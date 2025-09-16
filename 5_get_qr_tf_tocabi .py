@@ -36,7 +36,7 @@ def load_yaml_head2cam_tf(path):
         d = yaml.safe_load(f)
     euler_zyx = d["euler_zyx"]
     trans = d["translation"]
-    R = tft.euler_matrix(euler_zyx[0], euler_zyx[1], euler_zyx[2], axes='rzyx')[:3,:3]
+    R = tft.euler_matrix(euler_zyx[0], euler_zyx[1], euler_zyx[2])[:3,:3]
     T = np.eye(4)
     T[:3,:3] = R
     T[:3, 3] = np.array(trans)
@@ -122,9 +122,13 @@ class QRPublisher:
     # Run loop
     # --------------------------------------------------------
     def spin(self):
-        rate = rospy.Rate(30)
+        rate = rospy.Rate(30)   # if you want to run at camera fps
+        counter = 0             # for printing TF every 15 frames
+
         while not rospy.is_shutdown():
             base2head = self.lookup_tf(self.base, self.head)
+            if (counter % 15 == 0):
+                rospy.loginfo(f"base2head transform:\n{base2head}")
             head2cam = load_yaml_head2cam_tf("head2cam.yaml")
             frame    = self.pipe.wait_for_frames().get_color_frame()
             img      = cv2.cvtColor(np.asanyarray(frame.get_data()),
@@ -145,6 +149,8 @@ class QRPublisher:
                 cv2.imshow("Live", img)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+            
+            counter += 1
             rate.sleep()
 
         self.pipe.stop()
@@ -184,6 +190,7 @@ class QRPublisher:
         corners, ids, _ = cv2.aruco.detectMarkers(img_bgr, self.dict,
                                                   parameters=self.par)
         if ids is None:
+            rospy.loginfo("No marker detected")
             return None
         rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
                             corners[0], self.mlen, self.K, self.dist)
@@ -223,7 +230,7 @@ def main():
     ap.add_argument('--dictionary',
                     choices=['4X4_50','5X5_100','6X6_250','7X7_1000'],
                     default='6X6_250')
-    ap.add_argument('--base-frame',  default='world')
+    ap.add_argument('--base-frame',  default='base_link')
     ap.add_argument('--head-frame',   default='head_link')
     ap.add_argument('--qr-frame',    default='object_frame')
     ap.add_argument('--filter-N',    type=int, default=10,
