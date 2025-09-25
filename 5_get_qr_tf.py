@@ -80,7 +80,7 @@ class QRPublisher:
         self.pipe  = rs.pipeline()
         cfg        = rs.config()
         cfg.enable_stream(rs.stream.color, args.width, args.height,
-                          rs.format.bgr8, args.fps)
+                          rs.format.rgb8, args.fps)
         self.pipe.start(cfg)
 
         # Intrinsics
