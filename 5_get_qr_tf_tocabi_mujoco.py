@@ -17,7 +17,7 @@ import pyrealsense2 as rs
 import rospy
 import tf2_ros
 import tf.transformations as tft
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseStamped
 from math import sqrt, atan2, asin
 
 # Used for receiving MuJoCo camera information
@@ -90,14 +90,16 @@ class QRPublisher:
         self.buf   = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.buf)
 
+        # Publisher
+        self.base2cam_pub = rospy.Publisher('/camera/qr_pose', PoseStamped, queue_size=1)                                          # send TF from base to cam
+
+        # Subscriber
+        self.img_sub = rospy.Subscriber("/mujoco_ros_interface/camera/image", Image, self.image_callback, queue_size=1)           # receive Mujoco's virtual camera img
+        self.base2head_sub = rospy.Subscriber("/tocabi_cc/base_to_head", PoseStamped, self.base2head_callback, queue_size=1)      # receive TF from base to head
+
         # Image from MuJoCo camera
         self.bridge = CvBridge()
         self.img = None
-
-        # Subscribe to Mujoco's virtual camera
-        self.sub = rospy.Subscriber("/mujoco_ros_interface/camera/image",
-                                    Image,
-                                    self.image_callback)
 
         # Intrinsics
         if args.intrinsics:
@@ -112,6 +114,10 @@ class QRPublisher:
             getattr(cv2.aruco, 'DICT_'+args.dictionary))
         self.par  = cv2.aruco.DetectorParameters()
         self.mlen = args.marker_length
+
+        # TF
+        self.base2head = None
+        self.head2cam = load_yaml_head2cam_tf("TF_head2cam.yaml")
 
         # Frames & filter
         self.base  = args.base_frame
@@ -138,18 +144,17 @@ class QRPublisher:
                 rate.sleep()
                 continue
 
-            base2head = self.lookup_tf(self.base, self.head)
             if (counter % 15 == 0):
-                rospy.loginfo(f"base2head transform:\n{base2head}")
-            head2cam = load_yaml_head2cam_tf("TF_head2cam.yaml")
+                rospy.loginfo(f"base2head transform:\n{self.base2head}")
 
             cam2qr = self.detect_marker(self.img)
-            if base2head is not None and cam2qr is not None:
-                base2qr = base2head @ head2cam @ cam2qr
+            if self.base2head is not None and cam2qr is not None:
+                base2qr = self.base2head @ self.head2cam @ cam2qr
                 p = base2qr[:3, 3]
                 q = tft.quaternion_from_matrix(base2qr)
-                self.filt.add(p, q)
-                out = self.filt.get()
+                # self.filt.add(p, q)
+                # out = self.filt.get()
+                out = p, q
                 if out:
                     self.publish_tf(out[0], out[1])
 
@@ -163,28 +168,6 @@ class QRPublisher:
             rate.sleep()
 
         cv2.destroyAllWindows()
-
-    # --------------------------------------------------------
-    # Get the MuJoCo camera image through ros
-    # --------------------------------------------------------
-    def image_callback(self, msg):
-        self.img = self.bridge.imgmsg_to_cv2(msg,"bgr8")
-
-    # --------------------------------------------------------
-    # TF lookup parent → child  → 4×4
-    # --------------------------------------------------------
-    def lookup_tf(self, parent, child):
-        try:
-            ts = self.buf.lookup_transform(parent, child, rospy.Time(0))
-        except Exception:
-            return None
-        T = np.eye(4)
-        t = ts.transform.translation
-        T[:3, 3] = [t.x, t.y, t.z]
-        q = ts.transform.rotation
-        R = tft.quaternion_matrix([q.x, q.y, q.z, q.w])[:3, :3]
-        T[:3, :3] = R
-        return T
 
     # --------------------------------------------------------
     # Detect first ArUco marker → cam→qr 4×4
@@ -214,13 +197,35 @@ class QRPublisher:
     # Publish TF  base → qr  (dynamic broadcaster)
     # --------------------------------------------------------
     def publish_tf(self, pos, quat):
-        ts = TransformStamped()
-        ts.header.stamp = rospy.Time.now()
-        ts.header.frame_id  = self.base
-        ts.child_frame_id   = self.qr
-        ts.transform.translation.x, ts.transform.translation.y, ts.transform.translation.z = pos
-        ts.transform.rotation.x, ts.transform.rotation.y, ts.transform.rotation.z, ts.transform.rotation.w = quat
-        self.tfb.sendTransform(ts)
+        ps = PoseStamped()
+        ps.header.stamp = rospy.Time.now()
+        ps.header.frame_id = self.base
+
+        ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = pos
+        ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = quat
+        self.base2cam_pub.publish(ps)
+    
+    # --------------------------------------------------------
+    # Get the MuJoCo camera image through ros
+    # --------------------------------------------------------
+    def image_callback(self, msg):
+        self.img = self.bridge.imgmsg_to_cv2(msg,"bgr8")
+
+    # --------------------------------------------------------
+    # Get TF from base frame to head frame through ros
+    # --------------------------------------------------------
+    def base2head_callback(self, msg):
+        T = np.eye(4)
+
+        t = msg.pose.position
+        T[:3, 3] = [t.x, t.y, t.z]
+
+        q = msg.pose.orientation
+        R = tft.quaternion_matrix([q.x, q.y, q.z, q.w])[:3, :3]
+        T[:3, :3] = R
+
+        self.base2head = T
+
 
 
 # ------------------------------------------------------------

@@ -17,9 +17,13 @@ import pyrealsense2 as rs
 import rospy
 import tf2_ros
 import tf.transformations as tft
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import TransformStamped
 from math import sqrt, atan2, asin
 
+# Used for receiving MuJoCo camera information
+from sensor_msgs.msg import Image
+from std_msgs.msg import Bool
+from cv_bridge import CvBridge
 
 # ------------------------------------------------------------
 # Helpers
@@ -87,36 +91,31 @@ class QRPublisher:
         self.buf   = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.buf)
 
-        # Publisher
-        self.base2cam_pub = rospy.Publisher('/camera/qr_pose', PoseStamped, queue_size=1)                                          # send TF from base to cam
+        # Detected
+        self.detect_pub = rospy.Publisher('camera/detected', Bool, queue_size=1)
 
-        # Subscriber
-        self.base2head_sub = rospy.Subscriber("/tocabi_cc/base_to_head", PoseStamped, self.base2head_callback, queue_size=1)      # receive TF from base to head
+        # Image from MuJoCo camera
+        self.bridge = CvBridge()
+        self.img = None
 
-
-        # RealSense
-        self.pipe  = rs.pipeline()
-        cfg        = rs.config()
-        cfg.enable_stream(rs.stream.color, args.width, args.height,
-                          rs.format.rgb8, args.fps)
-        self.pipe.start(cfg)
+        # Subscribe to Mujoco's virtual camera
+        self.sub = rospy.Subscriber("/mujoco_ros_interface/camera/image",
+                                    Image,
+                                    self.image_callback)
 
         # Intrinsics
         if args.intrinsics:
             self.K, self.dist = load_intrinsics(args.intrinsics)
             rospy.loginfo("Loaded intrinsics from %s", args.intrinsics)
         else:
-            self.K = self.dist = None      # will auto‑fetch on first frame
+            rospy.logwarn("No intrinsics provided, ArUco detection may fail.")
+            self.K = self.dist = None
 
         # ArUco
         self.dict = cv2.aruco.getPredefinedDictionary(
             getattr(cv2.aruco, 'DICT_'+args.dictionary))
         self.par  = cv2.aruco.DetectorParameters()
         self.mlen = args.marker_length
-
-        # TF
-        self.base2head = None
-        self.head2cam = load_yaml_head2cam_tf("TF_head2cam.yaml")
 
         # Frames & filter
         self.base  = args.base_frame
@@ -137,35 +136,44 @@ class QRPublisher:
         counter = 0             # for printing TF every 15 frames
 
         while not rospy.is_shutdown():
+            # waiting for loading camera
+            if self.img is None:
+                rospy.logwarn_throttle(5, "Waiting for camera image...")
+                rate.sleep()
+                continue
+
+            base2head = self.lookup_tf(self.base, self.head)
             if (counter % 15 == 0):
-                rospy.loginfo(f"base2head transform:\n{self.base2head}")
+                rospy.loginfo(f"base2head transform:\n{base2head}")
+            head2cam = load_yaml_head2cam_tf("TF_head2cam.yaml")
 
-            frame    = self.pipe.wait_for_frames().get_color_frame()
-            img      = cv2.cvtColor(np.asanyarray(frame.get_data()),
-                                    cv2.COLOR_RGB2BGR)
-
-            cam2qr = self.detect_marker(img)
-            if self.base2head is not None and cam2qr is not None:
-                base2qr = self.base2head @ self.head2cam @ cam2qr
+            cam2qr = self.detect_marker(self.img)
+            if base2head is not None and cam2qr is not None:
+                base2qr = base2head @ head2cam @ cam2qr
                 p = base2qr[:3, 3]
                 q = tft.quaternion_from_matrix(base2qr)
-                # self.filt.add(p, q)
-                # out = self.filt.get()
-                out = p, q
+                self.filt.add(p, q)
+                out = self.filt.get()
                 if out:
                     self.publish_tf(out[0], out[1])
+                    self.detect_pub.publish(Bool(data=True))
 
             if self.gui:
-                overlay_help(img, "q: quit")
-                cv2.imshow("Live", img)
+                overlay_help(self.img, "q: quit")
+                cv2.imshow("Live", self.img)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             
             counter += 1
             rate.sleep()
 
-        self.pipe.stop()
         cv2.destroyAllWindows()
+
+    # --------------------------------------------------------
+    # Get the MuJoCo camera image through ros
+    # --------------------------------------------------------
+    def image_callback(self, msg):
+        self.img = self.bridge.imgmsg_to_cv2(msg,"bgr8")
 
     # --------------------------------------------------------
     # TF lookup parent → child  → 4×4
@@ -187,16 +195,9 @@ class QRPublisher:
     # Detect first ArUco marker → cam→qr 4×4
     # --------------------------------------------------------
     def detect_marker(self, img_bgr):
-        if self.K is None:     # fetch intrinsics once
-            intr = self.pipe.get_active_profile() \
-                      .get_stream(rs.stream.color) \
-                      .as_video_stream_profile() \
-                      .get_intrinsics()
-            self.K = np.array([[intr.fx, 0, intr.ppx],
-                               [0, intr.fy, intr.ppy],
-                               [0, 0, 1]], dtype=np.float32)
-            self.dist = np.array(intr.coeffs[:5], dtype=np.float32)
-            rospy.loginfo("Intrinsics auto-fetched from RealSense")
+        if self.K is None or self.dist is None:
+            rospy.logerr("Camera intrinsics not loaded!")
+            return None
 
         corners, ids, _ = cv2.aruco.detectMarkers(img_bgr, self.dict,
                                                   parameters=self.par)
@@ -218,28 +219,14 @@ class QRPublisher:
     # Publish TF  base → qr  (dynamic broadcaster)
     # --------------------------------------------------------
     def publish_tf(self, pos, quat):
-        ps = PoseStamped()
-        ps.header.stamp = rospy.Time.now()
-        ps.header.frame_id = self.base
+        ts = TransformStamped()
+        ts.header.stamp = rospy.Time.now()
+        ts.header.frame_id  = self.base
+        ts.child_frame_id   = self.qr
+        ts.transform.translation.x, ts.transform.translation.y, ts.transform.translation.z = pos
+        ts.transform.rotation.x, ts.transform.rotation.y, ts.transform.rotation.z, ts.transform.rotation.w = quat
+        self.tfb.sendTransform(ts)
 
-        ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = pos
-        ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = quat
-        self.base2cam_pub.publish(ps)
-
-    # --------------------------------------------------------
-    # Get TF from base frame to head frame through ros
-    # --------------------------------------------------------
-    def base2head_callback(self, msg):
-        T = np.eye(4)
-
-        t = msg.pose.position
-        T[:3, 3] = [t.x, t.y, t.z]
-
-        q = msg.pose.orientation
-        R = tft.quaternion_matrix([q.x, q.y, q.z, q.w])[:3, :3]
-        T[:3, :3] = R
-
-        self.base2head = T
 
 # ------------------------------------------------------------
 # CLI
@@ -247,11 +234,11 @@ class QRPublisher:
 def main():
     ap = argparse.ArgumentParser(
         description="Publish base→QR TF using RealSense & ArUco")
-    ap.add_argument('--intrinsics',  default="camIntrinsic.yaml", help="YAML with camera_matrix & dist_coeff")
+    ap.add_argument('--intrinsics',  default="camIntrinsic_mujoco.yaml", help="YAML with camera_matrix & dist_coeff")
     ap.add_argument('--width',       type=int, default=1280)
     ap.add_argument('--height',      type=int, default=720)
     ap.add_argument('--fps',         type=int, default=30)
-    ap.add_argument('--marker-length',type=float, default=0.04)
+    ap.add_argument('--marker-length',type=float, default=0.10)
     ap.add_argument('--dictionary',
                     choices=['4X4_50','5X5_100','6X6_250','7X7_1000'],
                     default='6X6_250')
