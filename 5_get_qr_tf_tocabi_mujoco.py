@@ -91,7 +91,7 @@ class QRPublisher:
         tf2_ros.TransformListener(self.buf)
 
         # Publisher
-        self.base2cam_pub = rospy.Publisher('/camera/qr_pose', PoseStamped, queue_size=1)                                          # send TF from base to cam
+        self.base2cam_pub = rospy.Publisher('/camera/qr_pose', PoseStamped, queue_size=1)                                         # send TF from base to cam
 
         # Subscriber
         self.img_sub = rospy.Subscriber("/mujoco_ros_interface/camera/image", Image, self.image_callback, queue_size=1)           # receive Mujoco's virtual camera img
@@ -144,13 +144,12 @@ class QRPublisher:
                 rate.sleep()
                 continue
 
-            if (counter % 15 == 0):
-                rospy.loginfo(f"base2head transform:\n{self.base2head}")
-
             cam2qr = self.detect_marker(self.img)
             if self.base2head is not None and cam2qr is not None:
                 base2qr = self.base2head @ self.head2cam @ cam2qr
                 p = base2qr[:3, 3]
+                if (counter % 15 == 0):
+                    rospy.loginfo(f"base2qr translation:{p}")
                 q = tft.quaternion_from_matrix(base2qr)
                 # self.filt.add(p, q)
                 # out = self.filt.get()
