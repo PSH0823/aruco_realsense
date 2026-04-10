@@ -103,35 +103,16 @@ class QRPublisher:
         self.pipe.start(cfg)
 
         # Intrinsics
-        if args.intrinsics:
-            self.K, self.dist = load_intrinsics(args.intrinsics)
-            rospy.loginfo("Loaded intrinsics from %s", args.intrinsics)
-        else:
-            intr = self.pipe.get_active_profile() \
-                      .get_stream(rs.stream.color) \
-                      .as_video_stream_profile() \
-                      .get_intrinsics()
-            self.K = np.array([[intr.fx, 0, intr.ppx],
-                               [0, intr.fy, intr.ppy],
-                               [0, 0, 1]], dtype=np.float32)
-            self.dist = np.array(intr.coeffs[:5], dtype=np.float32)
+        intr = self.pipe.get_active_profile() \
+                    .get_stream(rs.stream.color) \
+                    .as_video_stream_profile() \
+                    .get_intrinsics()
+        self.K = np.array([[intr.fx, 0, intr.ppx],
+                            [0, intr.fy, intr.ppy],
+                            [0, 0, 1]], dtype=np.float32)
+        self.dist = np.array(intr.coeffs[:5], dtype=np.float32)
 
-            rospy.loginfo("Intrinsics auto-fetched from RealSense")
-
-        # if args.intrinsics and os.path.exists(args.intrinsics):
-        #     self.K, self.dist = load_intrinsics(args.intrinsics)
-        #     rospy.loginfo("Loaded intrinsics from %s", args.intrinsics)
-        # else:
-        #     intr = self.pipe.get_active_profile() \
-        #               .get_stream(rs.stream.color) \
-        #               .as_video_stream_profile() \
-        #               .get_intrinsics()
-        #     self.K = np.array([[intr.fx, 0, intr.ppx],
-        #                        [0, intr.fy, intr.ppy],
-        #                        [0, 0, 1]], dtype=np.float32)
-        #     self.dist = np.array(intr.coeffs[:5], dtype=np.float32)
-
-        #     rospy.loginfo("Intrinsics auto-fetched from RealSense")
+        rospy.loginfo("Intrinsics auto-fetched from RealSense")
 
         # ArUco
         self.dict = cv2.aruco.getPredefinedDictionary(
