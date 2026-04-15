@@ -166,6 +166,42 @@ class TFCollector:
             getattr(cv2.aruco, 'DICT_' + cfg.dictionary))
         self.aruco_param = cv2.aruco.DetectorParameters()
 
+        # 4개 마커 정의
+        # 1 0
+        # 2 3
+        ids = np.array([[1], [0], [2], [3]], dtype=np.int32)
+
+        s = self.mlen           # marker size (예: 0.03 or 0.04)
+        d = 0.005               
+
+        corners = [
+            # ID 1 (x-, y-)
+            np.array([[-d-s, -d-s, 0],
+                    [-d,   -d-s, 0],
+                    [-d,   -d,   0],
+                    [-d-s, -d,   0]], dtype=np.float32),
+
+            # ID 0 (x+, y-)
+            np.array([[ d,   -d-s, 0],
+                    [ d+s, -d-s, 0],
+                    [ d+s, -d,   0],
+                    [ d,   -d,   0]], dtype=np.float32),
+
+            # ID 2 (x-, y+)
+            np.array([[-d-s, d, 0],
+                    [-d,   d, 0],
+                    [-d, d+s, 0],
+                    [-d-s, d+s, 0]], dtype=np.float32),
+
+            # ID 3 (x+, y+)
+            np.array([[ d,  d, 0],
+                    [ d+s, d, 0],
+                    [ d+s, d+s, 0],
+                    [ d,  d+s, 0]], dtype=np.float32)
+        ]
+
+        self.board = cv2.aruco.Board(corners, self.aruco_dict, ids)
+
         # ROS
         rospy.init_node('tf_collector_node', anonymous=True)
         self.tf_buf = tf2_ros.Buffer()
@@ -234,6 +270,35 @@ class TFCollector:
         R, _ = cv2.Rodrigues(rvec[0])
         T = np.eye(4)
         T[:3, :3], T[:3, 3] = R, tvec[0].flatten()
+        return T
+    
+    def get_cam2qr_from_board(self, img):
+        corners, ids, _ = cv2.aruco.detectMarkers(
+            img, self.aruco_dict, parameters=self.aruco_param
+        )
+
+        if ids is None:
+            return None
+
+        # Board 기반 pose 추정
+        retval, rvec, tvec = cv2.aruco.estimatePoseBoard(
+            corners, ids, self.board, self.K, self.dist, None, None
+        )
+
+        if retval <= 0:
+            return None
+
+        # 시각화
+        cv2.aruco.drawDetectedMarkers(img, corners, ids)
+        cv2.drawFrameAxes(img, self.K, self.dist,
+                        rvec, tvec, self.mlen)
+
+        # 4x4 변환행렬
+        R, _ = cv2.Rodrigues(rvec)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = tvec.flatten()
+
         return T
 
     # --------------------------
@@ -343,14 +408,14 @@ def parse_args():
     p.add_argument('--width', type=int, default=1280)
     p.add_argument('--height', type=int, default=720)
     p.add_argument('--fps', type=int, default=30)
-    p.add_argument('--base-frame', default='panda_link0')
-    p.add_argument('--ee-frame',   default='panda_hand')
+    p.add_argument('--base-frame', default='base')
+    p.add_argument('--ee-frame',   default='upper_body')
     p.add_argument('--cam-frame',  default='camera')
     p.add_argument('--calib-frame', default='camera_calibrated')
-    p.add_argument('--marker-length', type=float, default=0.04)
+    p.add_argument('--marker-length', type=float, default=0.03)
     p.add_argument('--dictionary',
-                   choices=['4X4_50', '5X5_100', '6X6_250', '7X7_1000'],
-                   default='6X6_250')
+                   choices=['4X4_50', '5X5_100', '6X6_50', '7X7_1000'],
+                   default='6X6_50')
     p.add_argument('--output', default='TF_ee2cam.yaml', help='Output YAML file')
     p.add_argument('--no-display', action='store_true')
     return p.parse_args()
